@@ -153,3 +153,78 @@ def test_duration_excludes_selected_episodes_and_uses_fps():
     assert result['mean_duration_s'] == 20
     with pytest.raises(ValueError):
         duration_statistics([{'episode_index': 0, 'length': 150}], 15, [99])
+
+
+@pytest.mark.parametrize('action,facts,next_action', [
+    ('pour_bottle', {'left': 'bottle', 'right': 'cap', 'cap': 'open'}, 'close_cap'),
+    ('pour_cylinder', {'left': 'empty', 'right': 'cylinder', 'cap': 'closed'}, 'pickdown_cylinder'),
+])
+@pytest.mark.parametrize('attempts', [1, 2, 3])
+def test_pour_uses_camera_and_retries_until_upright(action, facts, next_action, attempts):
+    runner, arm, _ = build(['incomplete'] * (attempts - 1) + ['complete', 'complete'], initial_facts=facts)
+    runner.actions[action] = ActionConfig(.02)
+    result = runner.run(compile_plan('pour and continue', [action, next_action], initial_facts=facts))
+    assert result['status'] == 'finished'
+    assert result['completed_actions'] == [action, next_action]
+    assert [c for c in arm.calls if c[0] == 'run'] == [('run', .02)] * attempts + [('run', .01)]
+    assert runner.judge.calls == attempts + 1
+    assert arm.calls.count(('capture',)) == attempts + 1
+    assert len([e for e in result['events'] if e['phase'] == 'judged' and e['action'] == action]) == attempts
+    assert not [e for e in result['events'] if e['phase'] == 'completion_assumed']
+
+
+@pytest.mark.parametrize('outcomes', [['incomplete'] * 3, ['unknown']])
+def test_pour_stops_if_not_upright_or_not_visible(outcomes):
+    facts = {'left': 'empty', 'right': 'cylinder', 'cap': 'closed'}
+    runner, arm, _ = build(outcomes, initial_facts=facts)
+    runner.actions['pour_cylinder'] = ActionConfig(.01, completion_mode='vision')
+    result = runner.run(compile_plan('pour', ['pour_cylinder', 'pickdown_cylinder'], initial_facts=facts))
+    assert result['status'] == 'failed'
+    assert result['completed_actions'] == []
+    assert ('prepare', 'pickdown_cylinder') not in arm.calls
+    assert runner.judge.calls == len(outcomes)
+
+
+@pytest.mark.parametrize('failure', ['execution', 'wrong_receipt', 'cancel'])
+def test_pour_does_not_mask_errors_or_cancellation(failure):
+    facts = {'left': 'empty', 'right': 'cylinder', 'cap': 'closed'}
+    runner, arm, _ = build(initial_facts=facts)
+    def fail_window(seconds, cancel):
+        if failure == 'execution':
+            raise ExecutionError('inference or hold failed')
+        if failure == 'cancel':
+            cancel.set()
+            return arm.pause()
+        return replace(arm.pause(), execution_id='stale')
+    arm.run_window = fail_window
+    result = runner.run(compile_plan('pour', ['pour_cylinder', 'pickdown_cylinder'], initial_facts=facts))
+    assert result['status'] == ('cancelled' if failure == 'cancel' else 'failed')
+    assert result['completed_actions'] == []
+    assert ('prepare', 'pickdown_cylinder') not in arm.calls
+    assert runner.judge.calls == 0
+
+
+@pytest.mark.parametrize('action,facts,next_action', [
+    ('pour_bottle', {'left': 'bottle', 'right': 'cap', 'cap': 'open'}, 'close_cap'),
+    ('pour_cylinder', {'left': 'empty', 'right': 'cylinder', 'cap': 'closed'}, 'pickdown_cylinder'),
+])
+def test_demo_pour_finishes_one_window_without_camera_or_judge(action, facts, next_action):
+    runner, arm, _ = build(['complete'], initial_facts=facts)
+    runner.actions[action] = ActionConfig(.02, completion_mode='mean_window')
+    result = runner.run(compile_plan('pour and continue', [action, next_action], initial_facts=facts))
+    assert result['status'] == 'finished'
+    assert result['completed_actions'] == [action, next_action]
+    assert [c for c in arm.calls if c[0] == 'run'] == [('run', .02), ('run', .01)]
+    assert runner.judge.calls == arm.calls.count(('capture',)) == 1  # next action only
+    events = [e for e in result['events'] if e.get('action') == action]
+    assert not any(e['phase'] in ('judging', 'judged', 'decision_retry') for e in events)
+    assert next(e for e in events if e['phase'] == 'execution_window_complete')['visual_verified'] is False
+    assert next(e for e in events if e['phase'] == 'action_complete')['completion_basis'] == 'mean_window'
+
+
+def test_non_pour_cannot_skip_visual_completion():
+    runner, arm, _ = build()
+    runner.actions['pickup_bottle1'] = ActionConfig(.02, completion_mode='mean_window')
+    result = runner.run(compile_plan('pickup', ['pickup_bottle1']))
+    assert result['status'] == 'failed'
+    assert not arm.calls

@@ -8,7 +8,7 @@ from typing import Callable, Protocol
 from uuid import uuid4
 
 from .planning import Plan, compile_plan
-from .registry import ActionConfig, CAPABILITIES, Capability, INITIAL_FACTS
+from .registry import ActionConfig, CAPABILITIES, Capability, INITIAL_FACTS, ZERO_SHOT_ACTIONS
 
 
 class ExecutionError(RuntimeError):
@@ -109,6 +109,8 @@ class Runner:
                 if name not in self.actions:
                     raise ExecutionError(f"실행 설정 없음: {name}")
                 self.actions[name].validate(self.live)
+                if self.actions[name].completion_mode == 'mean_window' and name not in ZERO_SHOT_ACTIONS:
+                    raise ExecutionError('mean_window 완료 처리는 붓기 ACT에만 허용합니다')
             check_cancel()
             emit("preflight")
             # 첫 ACT도 시작 상태의 관절 정지와 레일 위치를 확인한 뒤 시작한다.
@@ -144,30 +146,38 @@ class Runner:
                         raise ExecutionError("이전 ACT의 정지 확인 응답입니다")
                     check_cancel()
                     emit("paused", action=name, attempt=attempt, stopped_at=pause.stopped_at)
-                    frames = self.act.capture(after=pause.stopped_at)
-                    if not frames or any(not f.data or f.captured_at <= pause.stopped_at for f in frames):
-                        raise ExecutionError("정지 확인 이후 촬영된 새 영상이 없습니다")
-                    emit("judging", action=name, attempt=attempt,
-                         frames=[{"topic": f.topic, "captured_at": f.captured_at} for f in frames])
-                    verdict = None
-                    for request_attempt in range(1, self.decision_attempts + 1):
+                    execution_only = config.completion_mode == 'mean_window'
+                    if execution_only:
+                        emit("execution_window_complete", action=name, attempt=attempt,
+                             duration_s=config.mean_duration_s, stopped_at=pause.stopped_at,
+                             visual_verified=False)
+                    else:
+                        frames = self.act.capture(after=pause.stopped_at)
+                        if not frames or any(not f.data or f.captured_at <= pause.stopped_at for f in frames):
+                            raise ExecutionError("정지 확인 이후 촬영된 새 영상이 없습니다")
+                        emit("judging", action=name, attempt=attempt,
+                             frames=[{"topic": f.topic, "captured_at": f.captured_at} for f in frames])
+                        verdict = None
+                        for request_attempt in range(1, self.decision_attempts + 1):
+                            check_cancel()
+                            try:
+                                verdict = self.judge.check(cap, frames)
+                                break
+                            except DecisionUnavailable as exc:
+                                emit("decision_retry", action=name, request_attempt=request_attempt, error=str(exc))
+                                if request_attempt == self.decision_attempts:
+                                    raise
+                                if cancel.wait(min(request_attempt, 2)):
+                                    check_cancel()
                         check_cancel()
-                        try:
-                            verdict = self.judge.check(cap, frames)
-                            break
-                        except DecisionUnavailable as exc:
-                            emit("decision_retry", action=name, request_attempt=request_attempt, error=str(exc))
-                            if request_attempt == self.decision_attempts:
-                                raise
-                            if cancel.wait(min(request_attempt, 2)):
-                                check_cancel()
+                        emit("judged", action=name, attempt=attempt, verdict=asdict(verdict))
                     check_cancel()
-                    emit("judged", action=name, attempt=attempt, verdict=asdict(verdict))
-                    if verdict.status == "complete":
+                    if execution_only or verdict.status == "complete":
                         self.act.finish()
                         self.facts.update(cap.effects)
                         report["completed_actions"].append(name)
-                        emit("action_complete", action=name, attempt=attempt)
+                        emit("action_complete", action=name, attempt=attempt,
+                             completion_basis="mean_window" if execution_only else "visual_decision")
                         if hasattr(self.rail, "telemetry"):
                             try:
                                 emit("telemetry", data=self.rail.telemetry())

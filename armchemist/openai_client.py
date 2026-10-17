@@ -5,7 +5,7 @@ import math
 
 import requests
 
-from .registry import CAPABILITIES, INITIAL_FACTS
+from .registry import CAPABILITIES, INITIAL_FACTS, ZERO_SHOT_ACTIONS
 from .runtime import DecisionUnavailable, ExecutionError, Verdict
 
 
@@ -34,13 +34,26 @@ class OpenAIHTTP:
 
 
 class DecisionsJudge:
-    def __init__(self, client, *, model="gpt-6-luna", min_confidence=0.9):
-        if not 0 < min_confidence <= 1:
-            raise ValueError("판정 신뢰도 범위 오류")
-        self.client, self.model, self.min_confidence = client, model, min_confidence
+    def __init__(self, client, *, model="gpt-6-luna", examples=None, prompts=None):
+        self.client, self.model = client, model
+        self.examples = examples
+        self.prompts = prompts
 
     def check(self, cap, frames):
-        content = [{"type": "input_text", "text": f"ACT: {cap.id}. 완료 조건: {cap.completion}"}]
+        reference = self.examples.for_action(cap.id) if self.examples and cap.id not in ZERO_SHOT_ACTIONS else None
+        if self.examples and reference is None and cap.id not in ZERO_SHOT_ACTIONS:
+            raise ExecutionError(f"{cap.id}: 판정 예시가 없습니다")
+        question = reference['question'] if reference else cap.completion
+        content = [{"type": "input_text", "text": f"ACT: {cap.id}. 판정 질문: {question}"}]
+        if reference:
+            content.extend(reference['content'])
+            content.append({"type": "input_text", "text": "[참조 예시 끝] 위의 정답은 참조에만 적용된다."})
+        content.append({"type": "input_text", "text":
+                        "[현재 판정 대상 시작] 아래는 ACT 정지 확인 후 촬영한 최신 영상이다. "
+                        "아래 현재 영상만 판정하라. "
+                        "카메라 이름은 촬영 시점 식별용이며 로봇 팔의 좌우와 같다고 추정하지 마라."})
+        if not frames:
+            raise ExecutionError("현재 판정 대상 영상이 없습니다")
         for frame in frames:
             if frame.mime_type not in ("image/jpeg", "image/png"):
                 raise ExecutionError("지원하지 않는 영상 형식")
@@ -49,25 +62,32 @@ class DecisionsJudge:
                          base64.b64encode(frame.data).decode("ascii")}]
         body = {"model": self.model, "input": [{"role": "user", "content": content}],
                 "questions": [{"type": "choice", "name": "completion",
-                               "instructions": "정지 후 영상에 보이는 증거만으로 완료 조건을 판단하라. "
-                               "과거 동작이나 투입량을 추측하지 마라. 가림, 불명확함, 위험/실패 상태는 unknown이다.",
+                               "instructions": f"ACT {cap.id}: {question}\n"
+                               + ("라벨된 참조 이미지와 현재 이미지를 구분하라. " if reference else "") +
+                               "현재의 정지 후 영상에 보이는 증거만으로 완료 조건을 판단하라. "
+                               "complete와 incomplete 중 하나만 선택하라. "
+                               "완료 조건이 확인되면 complete, 아직 완료되지 않았거나 "
+                               "가림 등으로 완료 조건을 확인할 수 없으면 incomplete를 선택하라. "
+                               "일부 카메라가 가려져도 다른 카메라에서 완료 조건을 확인할 수 있으면 complete이다. "
+                               "과거 동작이나 투입량을 추측하지 마라.",
                                "choices": [
                                    {"value": "complete", "description": "완료 조건을 만족하는 상태가 명확히 보임"},
-                                   {"value": "incomplete", "description": "조건이 아직 미완료이며 같은 ACT의 추가 실행이 적절함"},
-                                   {"value": "unknown", "description": "판단 불가 또는 추가 실행이 적절하지 않은 실패 상태"}]}]}
+                                   {"value": "incomplete", "description": "완료 조건을 아직 만족하지 않거나 완료를 확인할 수 없음"}]}]}
+        if self.prompts:
+            body['questions'] = [self.prompts.question(cap.id, has_examples=reference is not None)]
         response = self.client.post("decisions", body)
         answers = [a for a in response.get("answers", []) if a.get("name") == "completion"]
         if len(answers) != 1:
             raise ExecutionError("완료 판정 응답이 누락되거나 중복되었습니다")
         answer = answers[0]
         if answer.get("type") != "choice":
-            return Verdict("unknown", "판정 거절 또는 잘못된 응답 형식", response.get("id", ""))
+            raise ExecutionError("판정 거절 또는 잘못된 응답 형식")
         choice, confidence = answer.get("choice"), answer.get("confidence")
-        if choice not in ("complete", "incomplete", "unknown") or not isinstance(confidence, (int, float)) \
+        if choice not in ("complete", "incomplete") or isinstance(confidence, bool) \
+                or not isinstance(confidence, (int, float)) \
                 or not math.isfinite(confidence) or not 0 <= confidence <= 1:
             raise ExecutionError("잘못된 완료 판정 응답")
-        status = choice if confidence >= self.min_confidence else "unknown"
-        return Verdict(status, f"{choice}, confidence={confidence:.4f}", response.get("id", ""))
+        return Verdict(choice, f"{choice}, confidence={confidence:.4f}", response.get("id", ""))
 
 
 class OpenAIPlanner:

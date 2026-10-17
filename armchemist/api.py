@@ -5,6 +5,7 @@ import json
 import hashlib
 import os
 import threading
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -111,7 +112,6 @@ def create_app(*, repository=None, runner=None, planner=None, graph=None, config
         plan = compile_plan(goal, names, gid, initial_facts=runner.facts)
         # 같은 확정 구성의 재요청/새로고침으로 별도의 실행 권한을 만들지 않는다.
         stable = json.dumps([gid, names, plan.initial_facts, config_fingerprint], sort_keys=True, ensure_ascii=False)
-        from dataclasses import replace
         plan = replace(plan, id=hashlib.sha256(stable.encode()).hexdigest()[:32],
                        config_fingerprint=config_fingerprint)
         repo.put("plan", plan.id, plan.to_dict())
@@ -372,8 +372,12 @@ def _configured_app(settings, data, lock):
                                     api_key=settings.secret('rail', 'api_key_env'),
                                     device_id=config['rail']['device_id'], timeout_s=config['rail']['timeout_s']),
                         DecisionsJudge(client, model=config['openai']['decision_model'],
-                                       min_confidence=config['openai']['min_confidence']),
+                                       examples=settings.decision_examples, prompts=settings.decision_prompts),
                         settings.actions, live=True, initial_facts=config['initial_facts'])
+    else:
+        runner = Runner(MockAct(), MockRail(), MockJudge(),
+                        {name: replace(action, mean_duration_s=0.01, duration_source='mock-only')
+                         for name, action in settings.actions.items()}, initial_facts=config['initial_facts'])
     api = create_app(repository=repo, runner=runner, planner=planner, graph=graph,
                      config_fingerprint=hashlib.sha256((settings.fingerprint + mode).encode()).hexdigest())
     @asynccontextmanager

@@ -10,6 +10,8 @@ from armchemist.settings import Settings, download_models, validate_model
 
 def configured(tmp_path, change=None):
     raw = copy.deepcopy(Settings().raw)
+    raw['openai']['decision_examples'] = str(Settings().resolve(raw['openai']['decision_examples']))
+    raw['openai']['decision_prompts'] = str(Settings().resolve(raw['openai']['decision_prompts']))
     raw['robot']['model_root'] = str(tmp_path / 'models')
     if change:
         change(raw)

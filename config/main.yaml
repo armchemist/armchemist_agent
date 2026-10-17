@@ -13,7 +13,10 @@ openai:
   planner_model: gpt-6-luna
   decision_model: gpt-6-luna
   timeout_s: 30
-  min_confidence: 0.9
+  # 완료/미완료 이진 판정. confidence는 기록만 하고 임계값을 적용하지 않는다.
+  decision_prompts: decision_prompts.json
+  # 사용자 승인 완료/미완료 예시. manifest와 JPEG는 저장소에 함께 포함합니다.
+  decision_examples: decision_examples/manifest.json
 rail:
   central_url: http://127.0.0.1:8100
   api_key_env: PISENSOR_API_KEY
@@ -175,6 +178,8 @@ actions:
     - cam_wrist_left
     - cam_wrist_right
   pour_bottle:
+    # 시연용: 평균 시간 1회 실행 및 정지 확인 후 다음 ACT. 영상 판정/재실행 없음.
+    completion_mode: mean_window
     model_repo: gc22-shin/pour_bottle_act
     model_revision: 55da043c754f4c5d90bac402eb69c2c1c6627f4b
     model_subfolder: 30fps_excl_ambiguous/100k
@@ -188,6 +193,8 @@ actions:
     - cam_head
     - cam_wrist
   pour_cylinder:
+    # 시연용: 평균 시간 1회 실행 및 정지 확인 후 다음 ACT. 영상 판정/재실행 없음.
+    completion_mode: mean_window
     model_repo: gc22-shin/pour_cylinder_act
     model_revision: 959cfb16d38c2b2b22a7c02c474883efd516b5c2
     model_subfolder: 30fps/100k

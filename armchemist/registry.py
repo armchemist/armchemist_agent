@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 
 STATIONS = ("시약존", "실린더존", "실험존")
 INITIAL_FACTS = {"left": "empty", "right": "empty", "cap": "closed"}
+ZERO_SHOT_ACTIONS = frozenset({"pour_bottle", "pour_cylinder"})
 
 
 @dataclass(frozen=True)
@@ -53,10 +54,14 @@ CAPABILITIES = {c.id: c for c in [
          {"left": "bottle", "right": "cap", "cap": "open"},
          {"right": "empty", "cap": "closed"}),
     _cap("pour_bottle", "시약병 붓기", "실험존", "left",
-         "시약병에서 목표 용기로 액체 이송이 끝나고 병이 붓기 전의 세운 자세로 돌아왔다.",
+         "시약병의 현재 자세만 확인한다. 병이 기울어져 있지 않고 세워져 있으면 complete, "
+         "기울어져 있거나 자세를 확인할 수 없으면 incomplete이다. "
+         "액체 이송 여부나 투입량은 완료 조건에 포함하지 않는다.",
          {"left": "bottle", "cap": "open"}, {}),
     _cap("pour_cylinder", "실린더 붓기", "실험존", "right",
-         "실린더에서 목표 용기로 액체 이송이 끝나고 실린더가 세운 자세로 돌아왔다.",
+         "실린더의 현재 자세만 확인한다. 실린더가 기울어져 있지 않고 세워져 있으면 complete, "
+         "기울어져 있거나 자세를 확인할 수 없으면 incomplete이다. "
+         "액체 이송 여부나 투입량은 완료 조건에 포함하지 않는다.",
          {"right": "cylinder"}, {}),
     _cap("setup_sensors", "센서 설치", "실험존", "right",
          "측정할 용기 안에 센서가 설치되어 있고 오른손이 센서를 놓았다.",
@@ -74,8 +79,11 @@ class ActionConfig:
     fps: int = 0
     robot_type: str = ""
     camera_topics: tuple[str, ...] = ()
+    completion_mode: str = "vision"
 
     def validate(self, live=False):
+        if self.completion_mode not in ('vision', 'mean_window'):
+            raise ValueError('completion_mode는 vision 또는 mean_window여야 합니다')
         if isinstance(self.mean_duration_s, bool) or not math.isfinite(self.mean_duration_s) \
                 or not 0 < self.mean_duration_s <= 600:
             raise ValueError("평균 실행 시간은 0 초과 600 이하의 유한한 값이어야 합니다")
@@ -90,7 +98,9 @@ class ActionConfig:
 
 def demo_actions():
     # 모의 실행에서만 쓰며 데이터셋 통계로 표시하지 않는다.
-    return {name: ActionConfig(0.01, duration_source="mock-only") for name in CAPABILITIES}
+    return {name: ActionConfig(0.01, duration_source="mock-only",
+                               completion_mode='mean_window' if name in ZERO_SHOT_ACTIONS else 'vision')
+            for name in CAPABILITIES}
 
 
 def duration_statistics(episodes: list[dict], fps: float, excluded=()) -> dict:

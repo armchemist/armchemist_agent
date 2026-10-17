@@ -35,7 +35,7 @@ class Session:
         return self.request('POST', url, **kwargs)
 
 
-@pytest.mark.parametrize('answer,status', [({'type': 'choice', 'choice': 'complete', 'confidence': .97}, 'complete'), ({'type': 'choice', 'choice': 'incomplete', 'confidence': .96}, 'incomplete'), ({'type': 'choice', 'choice': 'complete', 'confidence': .51}, 'unknown'), ({'type': 'refusal'}, 'unknown')])
+@pytest.mark.parametrize('answer,status', [({'type': 'choice', 'choice': 'complete', 'confidence': .97}, 'complete'), ({'type': 'choice', 'choice': 'incomplete', 'confidence': .96}, 'incomplete'), ({'type': 'choice', 'choice': 'complete', 'confidence': .01}, 'complete'), ({'type': 'choice', 'choice': 'incomplete', 'confidence': 0}, 'incomplete')])
 def test_decisions_official_contract_and_uncertainty(answer, status):
     session = Session([Response({'id': 'd1', 'answers': [{'name': 'completion', **answer}]})])
     judge = DecisionsJudge(OpenAIHTTP('test-key', session=session))
@@ -44,7 +44,21 @@ def test_decisions_official_contract_and_uncertainty(answer, status):
     _, url, kwargs = session.calls[0]
     assert url.endswith('/v1/decisions')
     assert kwargs['json']['questions'][0]['name'] == 'completion'
+    assert [c['value'] for c in kwargs['json']['questions'][0]['choices']] == ['complete', 'incomplete']
     assert kwargs['json']['input'][0]['content'][-1]['image_url'].startswith('data:image/jpeg;base64,')
+
+
+@pytest.mark.parametrize('answer', [
+    {'type': 'refusal'},
+    {'type': 'choice', 'choice': 'unknown', 'confidence': .99},
+    {'type': 'choice', 'choice': 'complete', 'confidence': True},
+    {'type': 'choice', 'choice': 'complete', 'confidence': float('nan')},
+])
+def test_invalid_binary_response_is_error_not_act_retry(answer):
+    session = Session([Response({'answers': [{'name': 'completion', **answer}]})])
+    with pytest.raises(ExecutionError):
+        DecisionsJudge(OpenAIHTTP('test-key', session=session)).check(
+            CAPABILITIES['pickup_bottle1'], [Frame('head', 1, b'image')])
 
 
 @pytest.mark.parametrize('response', [Response({}, 429), Response({}, 503), requests.Timeout()])

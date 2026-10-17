@@ -9,7 +9,9 @@ from pathlib import Path
 
 import yaml
 
-from .registry import ActionConfig, CAPABILITIES
+from .registry import ActionConfig, CAPABILITIES, ZERO_SHOT_ACTIONS
+from .decision_examples import DecisionExamples
+from .decision_prompts import DecisionPrompts
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / 'config/main.yaml'
 
@@ -70,11 +72,22 @@ class Settings:
                 raise ValueError('완료 판정에는 RGB 카메라를 선택하세요')
             keys = ('mean_duration_s', 'model_revision', 'dataset_revision', 'duration_source', 'fps', 'robot_type')
             action = ActionConfig(**{k: value[k] for k in keys},
-                                  policy_path=str(self.policy_path(name)), camera_topics=camera_topics)
+                                  policy_path=str(self.policy_path(name)), camera_topics=camera_topics,
+                                  completion_mode=value.get('completion_mode', 'vision'))
             action.validate(live=True)
+            if action.completion_mode == 'mean_window' and name not in ZERO_SHOT_ACTIONS:
+                raise ValueError('mean_window 완료 처리는 붓기 ACT에만 허용합니다')
             self.actions[name] = action
         if not self.actions:
             raise ValueError('최소 한 개 ACT 설정 필요')
+        examples_path = self.raw['openai'].get('decision_examples')
+        self.decision_examples = DecisionExamples(self.resolve(examples_path)) if examples_path else None
+        prompts_path = self.raw['openai'].get('decision_prompts')
+        self.decision_prompts = DecisionPrompts(self.resolve(prompts_path)) if prompts_path else None
+        if self.decision_examples:
+            for name in self.actions:
+                if name not in ZERO_SHOT_ACTIONS and name not in self.decision_examples.actions:
+                    raise ValueError(f'{name}: 등록된 판정 예시가 없습니다')
 
     def resolve(self, value):
         path = Path(value).expanduser()
@@ -105,7 +118,9 @@ class Settings:
 
     @property
     def fingerprint(self):
-        return hashlib.sha256(json.dumps(self.raw, sort_keys=True).encode()).hexdigest()
+        examples = self.decision_examples.fingerprint if self.decision_examples else ''
+        prompts = self.decision_prompts.fingerprint if self.decision_prompts else ''
+        return hashlib.sha256((json.dumps(self.raw, sort_keys=True) + examples + prompts).encode()).hexdigest()
 
 
 def validate_model(settings, name):
